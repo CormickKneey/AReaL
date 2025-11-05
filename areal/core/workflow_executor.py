@@ -369,14 +369,14 @@ class WorkflowExecutor:
 
     def _resolve_workflow(
         self,
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None,
+        workflow: RolloutWorkflow | type[RolloutWorkflow] | str,
         workflow_kwargs: dict[str, Any] | None,
     ) -> RolloutWorkflow:
         """Resolve workflow parameter to a RolloutWorkflow instance.
 
         Parameters
         ----------
-        workflow : RolloutWorkflow | Type[RolloutWorkflow] | str | None
+        workflow : RolloutWorkflow | type[RolloutWorkflow] | str
             The workflow specification
         workflow_kwargs : Dict[str, Any] | None
             Keyword arguments for workflow initialization
@@ -389,15 +389,10 @@ class WorkflowExecutor:
         Raises
         ------
         ValueError
-            If workflow_kwargs is required but not provided, or if workflow is None
+            If workflow_kwargs is required but not provided
         TypeError
             If workflow type is invalid
         """
-        if workflow is None:
-            raise ValueError(
-                "workflow must be provided. It can be a RolloutWorkflow instance, "
-                "a RolloutWorkflow class, or a string module path."
-            )
 
         # Case 1: Already a workflow instance
         if isinstance(workflow, RolloutWorkflow):
@@ -647,7 +642,7 @@ class WorkflowExecutor:
     def submit(
         self,
         data: dict[str, Any],
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow: RolloutWorkflow | type[RolloutWorkflow] | str,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> None:
@@ -789,7 +784,7 @@ class WorkflowExecutor:
     def rollout_batch(
         self,
         data: list[dict[str, Any]],
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow: RolloutWorkflow | type[RolloutWorkflow] | str,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> dict[str, Any]:
@@ -815,7 +810,7 @@ class WorkflowExecutor:
     def prepare_batch(
         self,
         dataloader: StatefulDataLoader,
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow: RolloutWorkflow | type[RolloutWorkflow] | str,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ):

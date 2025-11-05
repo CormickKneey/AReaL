@@ -27,7 +27,6 @@ from areal.api.io_struct import (
     WeightUpdateMeta,
     WeightUpdateRequests,
 )
-from areal.api.workflow_api import RolloutWorkflow
 from areal.platforms import current_platform
 from areal.utils import logging, name_resolve, names
 from areal.utils.http import arequest_with_retry, get_default_connector
@@ -617,7 +616,7 @@ class RemoteInfEngine:
     def submit(
         self,
         data: dict[str, Any],
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> None:
@@ -627,7 +626,7 @@ class RemoteInfEngine:
         ----------
         data : Dict[str, Any]
             The input data for rollout
-        workflow : RolloutWorkflow | Type[RolloutWorkflow] | str, optional
+        workflow : RolloutWorkflow | type[RolloutWorkflow] | str
             The workflow to use for rollout generation
         workflow_kwargs : Dict[str, Any], optional
             Keyword arguments to pass to the workflow constructor
@@ -667,7 +666,7 @@ class RemoteInfEngine:
     def rollout_batch(
         self,
         data: list[dict[str, Any]],
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> dict[str, Any]:
@@ -677,7 +676,7 @@ class RemoteInfEngine:
         ----------
         data : List[Dict[str, Any]]
             A list of input data dictionaries for rollout
-        workflow : RolloutWorkflow | Type[RolloutWorkflow] | str, optional
+        workflow : RolloutWorkflow | type[RolloutWorkflow] | str
             The workflow to use for rollout generation
         workflow_kwargs : Dict[str, Any], optional
             Keyword arguments to pass to the workflow constructor
@@ -699,7 +698,7 @@ class RemoteInfEngine:
     def prepare_batch(
         self,
         dataloader: StatefulDataLoader,
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ):
@@ -709,7 +708,7 @@ class RemoteInfEngine:
         ----------
         dataloader : StatefulDataLoader
             The data loader to pull data from
-        workflow : RolloutWorkflow | Type[RolloutWorkflow] | str, optional
+        workflow : RolloutWorkflow | type[RolloutWorkflow] | str
             The workflow to use for rollout generation
         workflow_kwargs : Dict[str, Any], optional
             Keyword arguments to pass to the workflow constructor

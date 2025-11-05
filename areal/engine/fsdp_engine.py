@@ -510,7 +510,7 @@ class FSDPEngine(BaseHFEngine):
         self,
         dataloader: StatefulDataLoader,
         granularity: int = 1,
-        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow: RolloutWorkflow | None | type[RolloutWorkflow] | str = None,
         workflow_kwargs: dict[str, Any] | None = None,
         should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> dict[str, Any]:

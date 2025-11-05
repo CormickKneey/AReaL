@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from concurrent.futures import Future
-from typing import Any, Optional
+from typing import Any
 
 from torchdata.stateful_dataloader import StatefulDataLoader
 
@@ -201,12 +201,12 @@ class RemotevLLMEngine(InferenceEngine):
     def submit(
         self,
         data: dict[str, Any],
-        workflow: RolloutWorkflow | None = None,
-        workflow_builder: Callable | None = None,
-        should_accept: Callable | None = None,
+        workflow,
+        workflow_kwargs=None,
+        should_accept=None,
     ) -> None:
         """Submit a request to the inference engine."""
-        return self._engine.submit(data, workflow, workflow_builder, should_accept)
+        return self._engine.submit(data, workflow, workflow_kwargs, should_accept)
 
     def wait(
         self, count: int, timeout: float | None = None, raise_timeout: bool = True
@@ -217,25 +217,25 @@ class RemotevLLMEngine(InferenceEngine):
     def rollout_batch(
         self,
         data: list[dict[str, Any]],
-        workflow: Optional["RolloutWorkflow"] = None,
-        workflow_builder: Callable | None = None,
-        should_accept: Callable | None = None,
+        workflow: RolloutWorkflow | type[RolloutWorkflow] | str | None = None,
+        workflow_kwargs: dict[str, Any] | None = None,
+        should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ) -> dict[str, Any]:
         """Submit a batch of requests and wait for results."""
         return self._engine.rollout_batch(
-            data, workflow, workflow_builder, should_accept
+            data, workflow, workflow_kwargs, should_accept
         )
 
     def prepare_batch(
         self,
         dataloader: StatefulDataLoader,
-        workflow: RolloutWorkflow | None = None,
-        workflow_builder: Callable | None = None,
-        should_accept: Callable | None = None,
+        workflow: RolloutWorkflow | type[RolloutWorkflow] | str,
+        workflow_kwargs: dict[str, Any] | None = None,
+        should_accept: Callable[[dict[str, Any]], bool] | str | None = None,
     ):
         """Asynchronously submit and wait until a full batch is ready."""
         return self._engine.prepare_batch(
-            dataloader, workflow, workflow_builder, should_accept
+            dataloader, workflow, workflow_kwargs, should_accept
         )
 
     def pause(self):
