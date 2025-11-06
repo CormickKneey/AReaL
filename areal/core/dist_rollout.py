@@ -123,13 +123,14 @@ class DistRolloutCoordinator:
         Dict[str, Any]
             Redistributed and broadcast batch available on all ranks
         """
-        if batch is not None:
-            redist = redistribute(
-                batch,
-                granularity=granularity,
-                group=self.train_engine.data_parallel_group,
-            )
-            batch = redist.data
+        # TODO: fix this
+        # if batch is not None:
+        #     redist = redistribute(
+        #         batch,
+        #         granularity=granularity,
+        #         group=self.train_engine.data_parallel_group,
+        #     )
+        #     batch = redist.data
 
         dist.barrier(device_ids=[current_platform.current_device()])
         current_platform.synchronize()
