@@ -165,7 +165,7 @@ class Tau2RLEnv:
         if (
             os.getenv("TAU2_USER_LLM_API_BASE") is not None
             and os.getenv("TAU2_USER_LLM_API_KEY") is not None
-            and self.user_llm is None
+            and self.user_llm_args is None
         ):
             self.user_llm_args = {
                 "api_base": os.getenv("TAU2_USER_LLM_API_BASE"),

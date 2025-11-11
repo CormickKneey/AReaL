@@ -42,7 +42,8 @@ async def run_agent_return_reward(data) -> float:
                                 model_settings=ModelSettings(
                                     temperature=1.0,
                                     top_p=1.0,
-                                    max_tokens=16384,
+                                    # NOTE: setting max_completion_tokens instead of max_tokens
+                                    extra_args={"max_completion_tokens": 8192},
                                 ),
                             ),
                             max_turns=10,

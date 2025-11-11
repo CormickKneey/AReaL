@@ -51,7 +51,10 @@ def gsm8k_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **k
 
 # pickle used by ProcessPoolExecutor can not serialize a local function, so we need a global function
 def sync_run_task(
-    data, proxy_addr, run_agent_return_reward: Callable[[Any], Awaitable[float]], agent_custom_env: dict = {}
+    data,
+    proxy_addr,
+    run_agent_return_reward: Callable[[Any], Awaitable[float]],
+    agent_custom_env: dict = {},
 ):
     async def run_task(data, proxy_addr, run_agent_return_reward: Callable):
         os.environ.update(agent_custom_env)
@@ -64,7 +67,6 @@ def sync_run_task(
                 reward = 0.0
 
             await session.set_reward(reward)
-
         return None, session_id, reward
 
     return asyncio.run(
@@ -260,6 +262,7 @@ def main(args):
         rollout_stat_scope="rollout",
         proxy_server=proxy_server,
         run_agent_return_reward=run_agent_return_reward,
+        agent_custom_env=config.agent_custom_env,
         process_pool_executor=process_pool_executor,
         dump_dir=os.path.join(
             StatsLogger.get_log_path(config.stats_logger), "generated"
