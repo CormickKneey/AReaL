@@ -51,9 +51,10 @@ def gsm8k_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **k
 
 # pickle used by ProcessPoolExecutor can not serialize a local function, so we need a global function
 def sync_run_task(
-    data, proxy_addr, run_agent_return_reward: Callable[[Any], Awaitable[float]]
+    data, proxy_addr, run_agent_return_reward: Callable[[Any], Awaitable[float]], agent_custom_env: dict = {}
 ):
     async def run_task(data, proxy_addr, run_agent_return_reward: Callable):
+        os.environ.update(agent_custom_env)
         async with ProxySession(base_url=proxy_addr) as session:
             session_id = session.session_id
             try:
@@ -81,6 +82,7 @@ class ProxyRLVRWorkflow(RolloutWorkflow):
         gconfig: GenerationHyperparameters,
         proxy_server: ProxyServer,
         run_agent_return_reward: Callable[[Any], Awaitable[float]],
+        agent_custom_env: dict = {},
         process_pool_executor: ProcessPoolExecutor = None,
         dump_dir: str | None = None,
         rollout_stat_scope: str = "rollout",
@@ -93,6 +95,7 @@ class ProxyRLVRWorkflow(RolloutWorkflow):
         self.gconfig = gconfig
         self.run_agent_return_reward = run_agent_return_reward
         self.dump_dir = dump_dir
+        self.agent_custom_env = agent_custom_env
 
     async def arun_episode(self, engine: InferenceEngine, data):
         futures = [
@@ -101,6 +104,7 @@ class ProxyRLVRWorkflow(RolloutWorkflow):
                 data,
                 f"{self.proxy_server.public_addr}/{self.api_version}",
                 self.run_agent_return_reward,
+                self.agent_custom_env,
             )
             for _ in range(self.n_samples)
         ]
@@ -156,6 +160,11 @@ class ProxyAgentConfig(GRPOConfig):
     agent_module_path: str = field(
         default="examples.any_agents.agent.math.math_agent",
         metadata={"help": "Module path for the agent definition."},
+    )
+
+    agent_custom_env: dict = field(
+        default_factory=dict,
+        metadata={"help": "Custom environment variables for the agent."},
     )
 
 
