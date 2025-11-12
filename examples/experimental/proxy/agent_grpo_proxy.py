@@ -174,17 +174,9 @@ def main(args):
     config, _ = load_expr_config(args, ProxyAgentConfig)
     config: ProxyAgentConfig
 
-    ## TODO: remove this
     from loguru import logger as tau2_logger
 
     tau2_logger.remove()
-    tau2_logger.add(
-        f"{StatsLogger.get_log_path(config.stats_logger)}/tau2.log",
-        rotation="100 MB",
-        encoding="utf-8",
-        level="INFO",
-    )
-
     rank = int(os.getenv("RANK"))
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 

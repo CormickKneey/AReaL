@@ -22,7 +22,7 @@ areal/experimental/tau2/
 ```bash
 ## 1. Download tau-bench data
 export TAU2_BENCH_DIR=/path/to/tau2-bench
-git clone -b feat/gym-only https://github.com/sierra-research/tau2-bench.git $TAU2_BENCH_DIR
+git clone https://github.com/sierra-research/tau2-bench.git $TAU2_BENCH_DIR
 export TAU2_DATA_DIR=$TAU2_BENCH_DIR/data
 export TAU2_OUTPUT_DIR=/path/to/output/dataset
 
@@ -30,7 +30,7 @@ export TAU2_OUTPUT_DIR=/path/to/output/dataset
 python areal/experimental/tau2/convert_dataset.py --data_dir $TAU2_DATA_DIR --output_dir $TAU2_OUTPUT_DIR --split train
 
 ## 3. install required packages
-pip install git+https://github.com/sierra-research/tau2-bench.git@15e68c887de4d586c4f718af3fc03581cb957dae
+pip install git+https://github.com/sierra-research/tau2-bench.git@0ed2fd8d830a20657d89ae9c2efcc94838aa7129
 pip install openai==2.7.1 openai-agents==0.5.0 transformers==4.56.1
 
 ## 4. login to wandb
