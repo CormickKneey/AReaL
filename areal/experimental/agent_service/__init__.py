@@ -27,7 +27,14 @@ from .protocol import (
     parse_frame,
     serialize_frame,
 )
-from .types import AgentRequest, AgentResponse, AgentRunnable, EventEmitter
+from .types import (
+    AgentRequest,
+    AgentResponse,
+    AgentRunnable,
+    EventEmitter,
+    Message,
+    Part,
+)
 
 if TYPE_CHECKING:
     from .data_proxy import DataProxyClient, create_data_proxy_app
@@ -60,6 +67,8 @@ __all__ = [
     "AgentRunnable",
     "DataProxyClient",
     "EventEmitter",
+    "Message",
+    "Part",
     "EventFrame",
     "Frame",
     "FrameType",

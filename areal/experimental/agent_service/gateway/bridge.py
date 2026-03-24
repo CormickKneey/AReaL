@@ -1,21 +1,109 @@
-"""OpenResponses HTTP bridge — translates POST /v1/responses to DataProxy turns."""
-
 from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from areal.utils import logging
 
 from ..auth import DEFAULT_ADMIN_KEY, admin_headers, make_admin_dependency
+from ..content import extract_message_content
 from ..protocol import generate_run_id
 
 logger = logging.getLogger("AgentBridge")
+
+
+@dataclass(frozen=True)
+class _OpenResponsesTurn:
+    input_items: list[dict[str, Any]]
+    instructions: str
+    model: str
+    user: str
+    tools: list[dict[str, Any]]
+    user_metadata: dict[str, Any]
+
+    @classmethod
+    def from_body(cls, body: dict[str, Any]) -> "_OpenResponsesTurn":
+        return cls(
+            input_items=list(body.get("input", [])),
+            instructions=str(body.get("instructions", "")),
+            model=str(body.get("model", "")),
+            user=str(body.get("user", "")),
+            tools=list(body.get("tools", [])),
+            user_metadata=dict(body.get("metadata", {})),
+        )
+
+    @property
+    def session_key(self) -> str:
+        return OpenResponsesBridge._derive_session_key(self.user, self.model)
+
+    @property
+    def message(self):
+        return OpenResponsesBridge._extract_message(self.input_items, self.instructions)
+
+    def build_worker_payload(self, run_id: str, response_id: str) -> dict[str, Any]:
+        return {
+            "message": self.message,
+            "run_id": run_id,
+            "queue_mode": "collect",
+            "config": {
+                "input_items": self.input_items,
+                "instructions": self.instructions,
+                "model": self.model,
+                "tools": self.tools,
+                "idempotency_key": response_id,
+                **self.user_metadata,
+            },
+        }
+
+    def build_openresponses_payload(
+        self,
+        response_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        output_items: list[dict[str, Any]] = []
+
+        output_parts = result.get("output", [])
+        for part in output_parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("text") is not None:
+                output_items.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": part["text"]}],
+                    }
+                )
+
+        for evt in result.get("events", []):
+            if evt.get("type") == "tool_call":
+                output_items.append(
+                    {
+                        "type": "function_call",
+                        "name": evt.get("name", ""),
+                        "arguments": evt.get("args", ""),
+                    }
+                )
+
+        response_metadata = dict(result.get("metadata", {}) or {})
+        status = result.get("status", "completed")
+        error = result.get("error")
+        if error:
+            response_metadata["error"] = error
+
+        return {
+            "id": response_id,
+            "object": "response",
+            "status": status,
+            "output": output_items,
+            "model": self.model,
+            "metadata": response_metadata,
+        }
 
 
 class AgentBridge(ABC):
@@ -27,20 +115,11 @@ class OpenResponsesBridge(AgentBridge):
     def __init__(self, router_addr: str, admin_key: str = DEFAULT_ADMIN_KEY) -> None:
         self._router_addr = router_addr
         self._auth_headers = admin_headers(admin_key)
-        self._http = httpx.AsyncClient(timeout=600.0)
-
-    async def close(self) -> None:
-        await self._http.aclose()
 
     async def handle_request(self, request: Request) -> Any:
-        body = await request.json()
+        turn = _OpenResponsesTurn.from_body(await request.json())
 
-        input_items: list[dict[str, Any]] = body.get("input", [])
-        instructions: str = body.get("instructions", "")
-        model: str = body.get("model", "")
-        user: str = body.get("user", "")
-
-        if not user:
+        if not turn.user:
             return JSONResponse(
                 {
                     "error": {
@@ -51,72 +130,25 @@ class OpenResponsesBridge(AgentBridge):
                 status_code=400,
             )
 
-        message = self._extract_message(input_items, instructions)
-        session_key = self._derive_session_key(user, model)
         run_id = generate_run_id()
         response_id = f"resp-{uuid.uuid4().hex[:12]}"
 
-        metadata = {
-            "input": input_items,
-            "instructions": instructions,
-            "tools": body.get("tools", []),
-            "model": model,
-            "idempotencyKey": response_id,
-            **body.get("metadata", {}),
-        }
-
         try:
-            route_resp = await self._http.post(
+            route_resp = await request.app.state.http_client.post(
                 f"{self._router_addr}/route",
-                json={"session_key": session_key},
+                json={"session_key": turn.session_key},
                 headers=self._auth_headers,
             )
             route_resp.raise_for_status()
             data_proxy_addr = route_resp.json()["data_proxy_addr"]
 
-            turn_resp = await self._http.post(
-                f"{data_proxy_addr}/session/{session_key}/turn",
-                json={
-                    "message": message,
-                    "run_id": run_id,
-                    "queue_mode": "collect",
-                    "metadata": metadata,
-                },
+            turn_resp = await request.app.state.http_client.post(
+                f"{data_proxy_addr}/session/{turn.session_key}/turn",
+                json=turn.build_worker_payload(run_id, response_id),
             )
             turn_resp.raise_for_status()
             result = turn_resp.json()
-
-            output_items: list[dict[str, Any]] = []
-            summary = result.get("summary", "")
-            if summary:
-                output_items.append(
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": summary}],
-                    }
-                )
-
-            for evt in result.get("events", []):
-                if evt.get("type") == "tool_call":
-                    output_items.append(
-                        {
-                            "type": "function_call",
-                            "name": evt.get("name", ""),
-                            "arguments": evt.get("args", ""),
-                        }
-                    )
-
-            return JSONResponse(
-                {
-                    "id": response_id,
-                    "object": "response",
-                    "status": "completed",
-                    "output": output_items,
-                    "model": model,
-                    "metadata": result.get("metadata", {}),
-                }
-            )
+            return JSONResponse(turn.build_openresponses_payload(response_id, result))
         except Exception as exc:
             logger.error("OpenResponses request failed: %s", exc)
             return JSONResponse(
@@ -125,25 +157,10 @@ class OpenResponsesBridge(AgentBridge):
             )
 
     @staticmethod
-    def _extract_message(input_items: list[dict[str, Any]], instructions: str) -> str:
-        parts: list[str] = []
-        if instructions:
-            parts.append(instructions)
-        for item in input_items:
-            if item.get("type") == "message":
-                content = item.get("content", "")
-                if isinstance(content, list):
-                    for block in content:
-                        if (
-                            isinstance(block, dict)
-                            and block.get("type") == "input_text"
-                        ):
-                            parts.append(block.get("text", ""))
-                elif isinstance(content, str):
-                    parts.append(content)
-            elif item.get("type") == "function_call_output":
-                parts.append(f"[tool result] {item.get('output', '')}")
-        return "\n".join(parts)
+    def _extract_message(
+        input_items: list[dict[str, Any]], instructions: str
+    ) -> str | list[dict[str, Any]]:
+        return extract_message_content(input_items, instructions)
 
     @staticmethod
     def _derive_session_key(user: str, model: str) -> str:
@@ -162,7 +179,3 @@ def mount_bridge(
     @app.post("/v1/responses", dependencies=[Depends(auth)])
     async def responses_endpoint(request: Request):
         return await bridge.handle_request(request)
-
-    @app.on_event("shutdown")
-    async def shutdown_bridge():
-        await bridge.close()

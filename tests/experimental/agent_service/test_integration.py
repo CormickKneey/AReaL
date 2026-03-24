@@ -1,9 +1,3 @@
-"""Integration tests for the Agent Service.
-
-Tests the full HTTP microservice stack: Worker → DataProxy → Router,
-plus utility functions from the Bridge and Gateway health endpoints.
-"""
-
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -13,12 +7,16 @@ import pytest
 from areal.experimental.agent_service.auth import DEFAULT_ADMIN_KEY, admin_headers
 from areal.experimental.agent_service.data_proxy.app import create_data_proxy_app
 from areal.experimental.agent_service.gateway.app import create_gateway_app
-from areal.experimental.agent_service.gateway.bridge import OpenResponsesBridge
+from areal.experimental.agent_service.gateway.bridge import (
+    OpenResponsesBridge,
+    _OpenResponsesTurn,
+)
 from areal.experimental.agent_service.router.app import create_router_app
 from areal.experimental.agent_service.types import (
     AgentRequest,
     AgentResponse,
     EventEmitter,
+    Part,
 )
 from areal.experimental.agent_service.worker.app import create_worker_app
 
@@ -26,26 +24,57 @@ httpx = pytest.importorskip("httpx")
 
 _AUTH = admin_headers(DEFAULT_ADMIN_KEY)
 
+TOOL_CALL_MEDIA = "application/x-tool-call"
+TOOL_RESULT_MEDIA = "application/x-tool-result"
+
 
 class _EchoAgent:
     async def run(
         self, request: AgentRequest, *, emitter: EventEmitter
     ) -> AgentResponse:
+        text = request.message.parts[0].text or "" if request.message.parts else ""
         history_summary = f"history={len(request.history)}"
-        await emitter.emit_delta(f"echo: {request.message} ({history_summary})")
-        return AgentResponse(summary=f"echo: {request.message}")
+        await emitter.emit_part(Part(text=f"echo: {text} ({history_summary})"))
+        return AgentResponse(
+            output=[Part(text=f"echo: {text}")],
+            history_text=f"echo: {text}",
+        )
 
 
 class _ToolAgent:
     async def run(
         self, request: AgentRequest, *, emitter: EventEmitter
     ) -> AgentResponse:
-        await emitter.emit_tool_call("lookup", '{"id": "123"}')
-        await emitter.emit_tool_result("lookup", '{"status": "ok"}')
-        await emitter.emit_delta("Lookup complete")
+        await emitter.emit_part(
+            Part(
+                data={"name": "lookup", "arguments": '{"id": "123"}'},
+                media_type=TOOL_CALL_MEDIA,
+            )
+        )
+        await emitter.emit_part(
+            Part(
+                data={"name": "lookup", "result": '{"status": "ok"}'},
+                media_type=TOOL_RESULT_MEDIA,
+            )
+        )
+        await emitter.emit_part(Part(text="Lookup complete"))
         return AgentResponse(
-            summary="Lookup complete",
+            output=[Part(text="Lookup complete")],
+            history_text="Lookup complete",
             metadata={"tool_calls": [{"name": "lookup", "arguments": {"id": "123"}}]},
+        )
+
+
+class _HtmlAgent:
+    async def run(
+        self, request: AgentRequest, *, emitter: EventEmitter
+    ) -> AgentResponse:
+        html_output = "<div><strong>Hello</strong> world</div>"
+        await emitter.emit_part(Part(text=html_output))
+        return AgentResponse(
+            output=[Part(text=html_output, media_type="text/html")],
+            history_text="Hello world",
+            metadata={"trace_id": "trace-1", "origin": "test"},
         )
 
 
@@ -58,8 +87,6 @@ def _make_worker_app(agent_cls):
 
 
 class TestWorkerDataProxyIntegration:
-    """Test DataProxy → Worker chain using ASGITransport for the Worker."""
-
     @pytest.mark.asyncio
     async def test_single_turn(self):
         worker_app = _make_worker_app(_EchoAgent)
@@ -68,7 +95,6 @@ class TestWorkerDataProxyIntegration:
         async with httpx.AsyncClient(
             transport=worker_transport, base_url="http://worker"
         ) as worker_client:
-            # DataProxy forwards to worker — test worker directly first
             resp = await worker_client.post(
                 "/run",
                 json={
@@ -80,17 +106,14 @@ class TestWorkerDataProxyIntegration:
             )
             assert resp.status_code == 200
             data = resp.json()
-            assert "echo: hello" in data["summary"]
+            assert "echo: hello" in data["output"][0]["text"]
 
     @pytest.mark.asyncio
     async def test_data_proxy_manages_history(self):
         worker_app = _make_worker_app(_EchoAgent)
         worker_transport = httpx.ASGITransport(app=worker_app)
-
-        # Create DataProxy pointing to worker
         proxy_app = create_data_proxy_app(worker_addr="http://worker")
 
-        # Patch DataProxy's httpx client to use worker's ASGITransport
         original_post = httpx.AsyncClient.post
 
         async def patched_post(self, url, **kwargs):
@@ -108,25 +131,22 @@ class TestWorkerDataProxyIntegration:
             async with httpx.AsyncClient(
                 transport=proxy_transport, base_url="http://proxy"
             ) as proxy_client:
-                # Turn 1
                 r1 = await proxy_client.post(
                     "/session/s1/turn",
                     json={"message": "hello", "run_id": "r1"},
                 )
                 assert r1.status_code == 200
-                assert "echo: hello" in r1.json()["summary"]
+                assert "echo: hello" in r1.json()["output"][0]["text"]
 
-                # Turn 2 — history should have turn 1
                 r2 = await proxy_client.post(
                     "/session/s1/turn",
                     json={"message": "world", "run_id": "r2"},
                 )
                 assert r2.status_code == 200
 
-                # Check history grew
                 h = await proxy_client.get("/session/s1/history")
                 history = h.json()["history"]
-                assert len(history) >= 2  # at least user+assistant from turn 1
+                assert len(history) >= 2
 
     @pytest.mark.asyncio
     async def test_close_session_clears_history(self):
@@ -158,6 +178,38 @@ class TestWorkerDataProxyIntegration:
                 await proxy_client.post("/session/s1/close")
                 h = await proxy_client.get("/session/s1/history")
                 assert h.json()["history"] == []
+
+    @pytest.mark.asyncio
+    async def test_data_proxy_prefers_history_text_over_output(self):
+        worker_app = _make_worker_app(_HtmlAgent)
+        worker_transport = httpx.ASGITransport(app=worker_app)
+        proxy_app = create_data_proxy_app(worker_addr="http://worker")
+
+        original_post = httpx.AsyncClient.post
+
+        async def patched_post(self, url, **kwargs):
+            if "worker" in url:
+                async with httpx.AsyncClient(
+                    transport=worker_transport, base_url="http://worker"
+                ) as wc:
+                    path = url.split("http://worker")[-1]
+                    return await wc.post(path, **kwargs)
+            return await original_post(self, url, **kwargs)
+
+        proxy_transport = httpx.ASGITransport(app=proxy_app)
+
+        with patch.object(httpx.AsyncClient, "post", patched_post):
+            async with httpx.AsyncClient(
+                transport=proxy_transport, base_url="http://proxy"
+            ) as proxy_client:
+                await proxy_client.post(
+                    "/session/s1/turn",
+                    json={"message": "hello", "run_id": "r1"},
+                )
+                history = (await proxy_client.get("/session/s1/history")).json()[
+                    "history"
+                ]
+                assert history[-1] == {"role": "assistant", "content": "Hello world"}
 
 
 class TestRouterIntegration:
@@ -214,13 +266,12 @@ class TestToolCallFlow:
                     json={"message": "lookup 123", "run_id": "r1"},
                 )
                 data = resp.json()
-                assert data["summary"] == "Lookup complete"
+                assert data["output"][0]["text"] == "Lookup complete"
                 events = data["events"]
                 types = {e["type"] for e in events}
                 assert "tool_call" in types
                 assert "tool_result" in types
 
-                # History should include tool call records
                 h = await proxy_client.get("/session/s1/history")
                 history = h.json()["history"]
                 tool_msgs = [m for m in history if m.get("role") == "tool"]
@@ -258,6 +309,7 @@ class TestBridgeExtractMessage:
     def test_instructions_prepended(self):
         items = [{"type": "message", "content": "Hi"}]
         result = OpenResponsesBridge._extract_message(items, "Be helpful")
+        assert isinstance(result, str)
         assert result.startswith("Be helpful")
         assert "Hi" in result
 
@@ -281,3 +333,41 @@ class TestBridgeDeriveSessionKey:
     def test_default_model(self):
         key = OpenResponsesBridge._derive_session_key("u1", "")
         assert key == "agent:default:u1"
+
+
+class TestOpenResponsesTurnRendering:
+    def test_payload_uses_typed_result_fields(self):
+        turn = _OpenResponsesTurn.from_body(
+            {
+                "input": [],
+                "instructions": "",
+                "model": "remote-agent",
+                "user": "u1",
+                "tools": [],
+                "metadata": {},
+            }
+        )
+
+        payload = turn.build_openresponses_payload(
+            "resp-1",
+            {
+                "output": [{"text": "<p>Hello</p>", "media_type": "text/html"}],
+                "status": "completed",
+                "metadata": {"origin": "test", "trace_id": "trace-1"},
+                "events": [
+                    {
+                        "type": "tool_call",
+                        "name": "lookup",
+                        "args": '{"q": "x"}',
+                    }
+                ],
+            },
+        )
+
+        assert payload["output"][0]["content"][0]["text"] == "<p>Hello</p>"
+        assert payload["output"][1] == {
+            "type": "function_call",
+            "name": "lookup",
+            "arguments": '{"q": "x"}',
+        }
+        assert payload["metadata"] == {"origin": "test", "trace_id": "trace-1"}

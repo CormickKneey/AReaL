@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 import traceback
 
@@ -40,15 +41,20 @@ def _make_accepted_json(request_id: str, run_id: str) -> str:
 
 
 def create_gateway_app(router_addr: str, admin_key: str = DEFAULT_ADMIN_KEY) -> FastAPI:
-    app = FastAPI(title="AReaL Agent Gateway")
-    http_client = httpx.AsyncClient(timeout=600.0)
-    _auth_headers = admin_headers(admin_key)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.http_client = httpx.AsyncClient(timeout=600.0)
+        yield
+        await app.state.http_client.aclose()
+
+    app = FastAPI(title="AReaL Agent Gateway", lifespan=lifespan)
+    auth_headers = admin_headers(admin_key)
 
     async def _route(session_key: str) -> str:
-        resp = await http_client.post(
+        resp = await app.state.http_client.post(
             f"{router_addr}/route",
             json={"session_key": session_key},
-            headers=_auth_headers,
+            headers=auth_headers,
         )
         resp.raise_for_status()
         return resp.json()["data_proxy_addr"]
@@ -59,15 +65,15 @@ def create_gateway_app(router_addr: str, admin_key: str = DEFAULT_ADMIN_KEY) -> 
         message: str,
         run_id: str,
         queue_mode: str,
-        metadata: dict,
+        config: dict,
     ) -> dict:
-        resp = await http_client.post(
+        resp = await app.state.http_client.post(
             f"{data_proxy_addr}/session/{session_key}/turn",
             json={
                 "message": message,
                 "run_id": run_id,
                 "queue_mode": queue_mode,
-                "metadata": metadata,
+                "config": config,
             },
         )
         resp.raise_for_status()
@@ -130,7 +136,7 @@ def create_gateway_app(router_addr: str, admin_key: str = DEFAULT_ADMIN_KEY) -> 
                         message=frame.message,
                         run_id=run_id,
                         queue_mode=frame.queue_mode.value,
-                        metadata=frame.params,
+                        config=frame.params,
                     )
 
                     for evt in result.get("events", []):
@@ -154,7 +160,11 @@ def create_gateway_app(router_addr: str, admin_key: str = DEFAULT_ADMIN_KEY) -> 
                     await websocket.send_text(
                         serialize_frame(
                             make_complete_response(
-                                frame.id, run_id, result.get("summary", "")
+                                frame.id,
+                                run_id,
+                                (result.get("output", [{}])[0] or {}).get("text", "")
+                                if result.get("output")
+                                else "",
                             )
                         )
                     )
@@ -172,9 +182,5 @@ def create_gateway_app(router_addr: str, admin_key: str = DEFAULT_ADMIN_KEY) -> 
             logger.info("WebSocket disconnected")
         except Exception:
             logger.exception("Unexpected error in WebSocket handler")
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        await http_client.aclose()
 
     return app

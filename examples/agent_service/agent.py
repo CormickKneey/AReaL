@@ -1,13 +1,3 @@
-"""Tau2 Agent for AReaL Agent Service (PydanticAI).
-
-Implements :class:`AgentRunnable` using PydanticAI.  Each call to ``run()``
-handles a **single turn** of a tau2 customer-service dialogue.  The agent
-uses tau2 environment tools (registered as PydanticAI function tools) and
-maintains conversation context via ``request.history``.
-
-Requires: ``pip install pydantic-ai tau2-bench``
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -22,18 +12,22 @@ from tau2.environment.environment import Environment
 from tau2.environment.tool import Tool as Tau2Tool
 from tau2.registry import registry
 
+from areal.experimental.agent_service.content import content_to_text, part_to_text
 from areal.experimental.agent_service.types import (
     AgentRequest,
     AgentResponse,
     EventEmitter,
+    Part,
 )
 from areal.utils import logging
 
 logger = logging.getLogger("Tau2Agent")
 
+TOOL_CALL_MEDIA = "application/x-tool-call"
+TOOL_RESULT_MEDIA = "application/x-tool-result"
+
 
 def _make_pydantic_tool(tau2_tool: Tau2Tool):
-    """Create a plain async function from a tau2 Tool for PydanticAI."""
     fn = tau2_tool._func  # noqa: SLF001
     name = tau2_tool.name
     doc = tau2_tool.openai_schema["function"].get("description", name)
@@ -72,12 +66,6 @@ def _think_tool_fn(thoughts: str) -> str:
 
 
 class Tau2Agent:
-    """AgentRunnable that wraps a PydanticAI Agent with tau2 tools.
-
-    Accepts a ``config`` dict (loaded from config.yaml by run_demo.py).
-    Falls back to environment variables if config is not provided.
-    """
-
     def __init__(self, config: dict | None = None, **kwargs: Any) -> None:
         config = config or {}
         tau2_cfg = config.get("tau2", {})
@@ -123,7 +111,7 @@ class Tau2Agent:
 
     def _build_environment(self) -> Environment:
         constructor = registry.get_env_constructor(self._domain)
-        return constructor(solo_mode=False)
+        return constructor(**{"solo_mode": False})
 
     async def run(
         self,
@@ -144,47 +132,66 @@ class Tau2Agent:
 
         message_history: list[ModelRequest | PAModelResponse] = []
         for msg in request.history:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
+            role = msg.role
+            content_text = "".join(part_to_text(p) for p in msg.parts)
 
             if role == "user":
                 message_history.append(
-                    ModelRequest(parts=[UserPromptPart(content=content or "")])
+                    ModelRequest(parts=[UserPromptPart(content=content_text or "")])
                 )
-            elif role == "assistant":
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
+            elif role == "assistant" or role.startswith("agent"):
+                tool_call_parts = [
+                    p for p in msg.parts if p.media_type == TOOL_CALL_MEDIA
+                ]
+                if tool_call_parts:
                     parts = []
-                    for tc in tool_calls:
-                        fn = tc.get("function", tc)
+                    for p in tool_call_parts:
+                        d = p.data or {}
                         parts.append(
                             ToolCallPart(
-                                tool_name=fn.get("name", ""),
-                                args=fn.get("arguments", ""),
-                                tool_call_id=tc.get("id", ""),
+                                tool_name=d.get("name", ""),
+                                args=d.get("arguments", ""),
+                                tool_call_id=d.get("call_id", ""),
                             )
                         )
                     message_history.append(PAModelResponse(parts=parts))
-                elif content:
+                elif content_text:
                     message_history.append(
-                        PAModelResponse(parts=[TextPart(content=content)])
+                        PAModelResponse(parts=[TextPart(content=content_text)])
                     )
             elif role == "tool":
-                tool_call_id = msg.get("tool_call_id", "")
-                message_history.append(
-                    ModelRequest(
-                        parts=[
-                            ToolReturnPart(
-                                tool_name=tool_call_id,
-                                content=content or "",
-                                tool_call_id=tool_call_id,
-                            )
-                        ]
+                tool_result_parts = [
+                    p for p in msg.parts if p.media_type == TOOL_RESULT_MEDIA
+                ]
+                for p in tool_result_parts:
+                    d = p.data or {}
+                    message_history.append(
+                        ModelRequest(
+                            parts=[
+                                ToolReturnPart(
+                                    tool_name=d.get("name", ""),
+                                    content=d.get("result", ""),
+                                    tool_call_id=d.get("call_id", ""),
+                                )
+                            ]
+                        )
                     )
-                )
+                if not tool_result_parts and content_text:
+                    message_history.append(
+                        ModelRequest(
+                            parts=[
+                                ToolReturnPart(
+                                    tool_name="",
+                                    content=content_text,
+                                    tool_call_id="",
+                                )
+                            ]
+                        )
+                    )
 
+        user_message = "".join(part_to_text(p) for p in request.message.parts)
         result = await self._agent.run(
-            request.message,
+            user_message,
             message_history=message_history,
         )
 
@@ -201,17 +208,34 @@ class Tau2Agent:
                     args = getattr(part, "args", "")
                     if isinstance(args, dict):
                         args = json.dumps(args)
-                    await emitter.emit_tool_call(name=name, args=str(args))
+                    call_id = str(getattr(part, "tool_call_id", "") or "")
+                    await emitter.emit_part(
+                        Part(
+                            data={
+                                "name": name,
+                                "arguments": str(args),
+                                "call_id": call_id,
+                            },
+                            media_type=TOOL_CALL_MEDIA,
+                        )
+                    )
                     tool_calls.append({"name": name, "arguments": args})
                 elif kind == "tool-return":
                     name = getattr(part, "tool_name", "")
                     content = str(getattr(part, "content", ""))
-                    await emitter.emit_tool_result(name=name, result=content)
+                    call_id = str(getattr(part, "tool_call_id", "") or "")
+                    await emitter.emit_part(
+                        Part(
+                            data={"name": name, "result": content, "call_id": call_id},
+                            media_type=TOOL_RESULT_MEDIA,
+                        )
+                    )
 
         if final_text:
-            await emitter.emit_delta(final_text)
+            await emitter.emit_part(Part(text=final_text))
 
         return AgentResponse(
-            summary=final_text[:200],
+            output=[Part(text=final_text)],
+            history_text=final_text,
             metadata={"tool_calls": tool_calls},
         )

@@ -1,9 +1,8 @@
-"""Data Proxy — stateful session proxy between Gateway and Worker."""
-
 from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,7 +17,6 @@ logger = logging.getLogger("AgentDataProxy")
 @dataclass
 class _SessionData:
     history: list[dict[str, Any]] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
     last_active: float = field(default_factory=time.monotonic)
 
 
@@ -26,7 +24,6 @@ def create_data_proxy_app(
     worker_addr: str,
     session_timeout: int = 3600,
 ) -> FastAPI:
-    app = FastAPI(title="AReaL Data Proxy")
     sessions: dict[str, _SessionData] = {}
     http_client = httpx.AsyncClient(timeout=600.0)
 
@@ -42,13 +39,22 @@ def create_data_proxy_app(
             if stale:
                 logger.info("Reaped %d idle sessions", len(stale))
 
-    @app.on_event("startup")
-    async def startup():
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.http_client = http_client
         app.state.reaper_task = asyncio.create_task(_reap_idle_sessions())
+        try:
+            yield
+        finally:
+            app.state.reaper_task.cancel()
+            try:
+                await app.state.reaper_task
+            except asyncio.CancelledError:
+                pass
+            await http_client.aclose()
 
-    @app.on_event("shutdown")
-    async def shutdown():
-        await http_client.aclose()
+    app = FastAPI(title="AReaL Data Proxy", lifespan=lifespan)
+    app.state.http_client = http_client
 
     @app.get("/health")
     async def health():
@@ -60,12 +66,6 @@ def create_data_proxy_app(
 
     @app.post("/session/{session_key}/turn")
     async def turn(session_key: str, body: dict[str, Any]):
-        """Process one turn. session_key must be unique per agent session.
-
-        When used with the rollout service, uniqueness is ensured by
-        ``/rl/start_session``.  When used standalone, callers must
-        generate unique keys (e.g. ``f"{model}:{user_id}"``).
-        """
         session = sessions.get(session_key)
         if session is None:
             session = _SessionData()
@@ -74,7 +74,6 @@ def create_data_proxy_app(
         message = body.get("message", "")
         run_id = body.get("run_id", "")
         queue_mode = body.get("queue_mode", "collect")
-        metadata = body.get("metadata", {})
 
         worker_request = {
             "message": message,
@@ -82,10 +81,12 @@ def create_data_proxy_app(
             "run_id": run_id,
             "history": session.history.copy(),
             "queue_mode": queue_mode,
-            "metadata": metadata,
+            "config": body.get("config", body.get("details", body.get("metadata", {}))),
         }
 
-        resp = await http_client.post(f"{worker_addr}/run", json=worker_request)
+        resp = await app.state.http_client.post(
+            f"{worker_addr}/run", json=worker_request
+        )
         resp.raise_for_status()
         result = resp.json()
 
@@ -94,7 +95,10 @@ def create_data_proxy_app(
         call_counter = 0
         for evt in result.get("events", []):
             if evt.get("type") == "tool_call":
-                call_id = f"call_{evt.get('name', '')}_{run_id}_{call_counter}"
+                call_id = (
+                    evt.get("call_id")
+                    or f"call_{evt.get('name', '')}_{run_id}_{call_counter}"
+                )
                 call_counter += 1
                 session.history.append(
                     {
@@ -113,7 +117,7 @@ def create_data_proxy_app(
                     }
                 )
             elif evt.get("type") == "tool_result":
-                result_call_id = (
+                result_call_id = evt.get("call_id") or (
                     f"call_{evt.get('name', '')}_{run_id}_{call_counter - 1}"
                     if call_counter > 0
                     else f"call_{evt.get('name', '')}_{run_id}_0"
@@ -126,9 +130,17 @@ def create_data_proxy_app(
                     }
                 )
 
-        summary = result.get("summary", "")
-        if summary:
-            session.history.append({"role": "assistant", "content": summary})
+        history_text = result.get("history_text")
+        if history_text is None:
+            output_parts = result.get("output", [])
+            if output_parts:
+                first_part = output_parts[0] if isinstance(output_parts, list) else {}
+                if isinstance(first_part, dict):
+                    history_text = first_part.get("text", "")
+                else:
+                    history_text = ""
+        if history_text:
+            session.history.append({"role": "assistant", "content": history_text})
 
         session.last_active = time.monotonic()
         return result

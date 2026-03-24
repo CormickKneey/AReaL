@@ -1,5 +1,3 @@
-"""Agent Worker — stateless HTTP server for agent execution."""
-
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -11,24 +9,42 @@ from fastapi.responses import JSONResponse
 from areal.utils import logging
 from areal.utils.dynamic_import import import_from_string
 
-from ..protocol import QueueMode
-from ..types import AgentRequest, AgentResponse, AgentRunnable
+from ..types import AgentRequest, AgentResponse, AgentRunnable, Part
 
 logger = logging.getLogger("AgentWorker")
+
+TOOL_CALL_MEDIA = "application/x-tool-call"
+TOOL_RESULT_MEDIA = "application/x-tool-result"
 
 
 class _CollectingEmitter:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
 
-    async def emit_delta(self, text: str) -> None:
-        self.events.append({"type": "delta", "text": text})
+    async def emit_part(self, part: Part) -> None:
+        if part.media_type == TOOL_CALL_MEDIA and part.data:
+            self.events.append(
+                {
+                    "type": "tool_call",
+                    "name": part.data.get("name", ""),
+                    "args": part.data.get("arguments", ""),
+                    "call_id": part.data.get("call_id", ""),
+                }
+            )
+        elif part.media_type == TOOL_RESULT_MEDIA and part.data:
+            self.events.append(
+                {
+                    "type": "tool_result",
+                    "name": part.data.get("name", ""),
+                    "result": part.data.get("result", ""),
+                    "call_id": part.data.get("call_id", ""),
+                }
+            )
+        elif part.text is not None:
+            self.events.append({"type": "delta", "text": part.text})
 
-    async def emit_tool_call(self, name: str, args: str) -> None:
-        self.events.append({"type": "tool_call", "name": name, "args": args})
-
-    async def emit_tool_result(self, name: str, result: str) -> None:
-        self.events.append({"type": "tool_result", "name": name, "result": result})
+    async def emit_status(self, status: str, message: str = "") -> None:
+        self.events.append({"type": "status", "status": status, "message": message})
 
 
 def create_worker_app(
@@ -52,21 +68,14 @@ def create_worker_app(
 
     @app.post("/run")
     async def run(body: dict[str, Any]):
-        request = AgentRequest(
-            message=body.get("message", ""),
-            session_key=body.get("session_key", ""),
-            run_id=body.get("run_id", ""),
-            history=body.get("history", []),
-            queue_mode=QueueMode(body.get("queue_mode", "collect")),
-            metadata=body.get("metadata", {}),
-        )
+        request = AgentRequest.from_payload(body)
 
         emitter = _CollectingEmitter()
 
         try:
             response: AgentResponse = await agent.run(request, emitter=emitter)
         except Exception as exc:
-            logger.exception("Agent run failed (session=%s)", request.session_key)
+            logger.exception("Agent run failed (session=%s)", request.session_id)
             return JSONResponse(
                 {"error": {"message": str(exc), "type": type(exc).__name__}},
                 status_code=500,

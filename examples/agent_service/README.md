@@ -127,13 +127,12 @@ curl -X POST http://localhost:8080/v1/responses \
 Create a class that satisfies the `AgentRunnable` protocol:
 
 ```python
-from areal.experimental.agent_service.agent_worker import (
-    AgentRequest, AgentResponse, EventEmitter,
+from areal.experimental.agent_service.types import (
+    AgentRequest, AgentResponse, EventEmitter, Part,
 )
 
 class MyAgent:
     def __init__(self, **kwargs):
-        # Configure LLM client, tools, etc.
         pass
 
     async def run(
@@ -142,11 +141,16 @@ class MyAgent:
         *,
         emitter: EventEmitter,
     ) -> AgentResponse:
-        # request.message — current user message
-        # request.history — prior conversation turns
-        # emitter — stream events back to client
-        await emitter.emit_delta("Hello!")
-        return AgentResponse(summary="Hello!")
+        # request.message — Message with .parts (list of Part)
+        # request.session_id — session identifier
+        # request.history — prior turns (list of Message)
+        # request.config — agent-specific configuration dict
+        user_text = request.message.parts[0].text or ""
+        await emitter.emit_part(Part(text=f"Hello, {user_text}!"))
+        return AgentResponse(
+            output=[Part(text=f"Hello, {user_text}!")],
+            history_text=f"Hello, {user_text}!",
+        )
 ```
 
 Then start a worker with your agent:
@@ -172,6 +176,8 @@ The agent accesses history via `request.history`:
 ```python
 async def run(self, request, *, emitter):
     for msg in request.history:
-        print(f"{msg['role']}: {msg['content']}")
+        role = msg.role
+        text = "".join(p.text or "" for p in msg.parts)
+        print(f"{role}: {text}")
     # ... generate response using full context
 ```
