@@ -100,9 +100,13 @@ class Tau2Agent:
         tools = [_make_pydantic_tool(t) for t in tau2_tools]
         system_prompt = env.get_policy()
 
-        model_name = agent_llm_cfg.get("model", "openai:default")
-        base_url = agent_llm_cfg.get("base_url")
-        api_key = agent_llm_cfg.get("api_key", "unused")
+        model_name = agent_llm_cfg.get("model") or os.environ.get(
+            "AGENT_LLM_MODEL", "openai:default"
+        )
+        base_url = agent_llm_cfg.get("base_url") or os.environ.get("AGENT_LLM_BASE_URL")
+        api_key = agent_llm_cfg.get("api_key") or os.environ.get(
+            "AGENT_LLM_API_KEY", "unused"
+        )
 
         if base_url:
             model: Any = OpenAIChatModel(

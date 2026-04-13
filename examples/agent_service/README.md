@@ -42,11 +42,12 @@ Client (HTTP/WS)
 
 ## Files
 
-| File          | Description                                           |
-| ------------- | ----------------------------------------------------- |
-| `agent.py`    | `Tau2Agent` — PydanticAI agent with tau2 domain tools |
-| `config.yaml` | Configuration: LLM endpoints, tau2 domain, data path  |
-| `run_demo.py` | One-click: starts all services, runs tau2 demo        |
+| File                     | Description                                                            |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `agent.py`               | `Tau2Agent` — PydanticAI agent with tau2 domain tools                  |
+| `config.yaml`            | Configuration: LLM endpoints, tau2 domain, data path                   |
+| `run_demo.py`            | One-click: starts all services in threads, runs tau2 demo              |
+| `run_controller_demo.py` | Controller-based: launches via Guard + Controller (production pattern) |
 
 ## Prerequisites
 
@@ -120,6 +121,63 @@ curl -X POST http://localhost:8080/v1/responses \
     "model": "tau2-agent",
     "user": "my-session"
   }'
+```
+
+## Controller-Based Deployment (Production)
+
+The Controller pattern mirrors how `GatewayInferenceController` manages the inference
+service stack. A Guard process manages child process lifecycles; the Controller
+orchestrates the launch sequence.
+
+### Step 1 — Start a Guard
+
+```bash
+python -m areal.experimental.agent_service.guard \
+    --experiment-name demo --trial-name run0 \
+    --role agent-guard --worker-index 0 --port 8090 --host 127.0.0.1
+```
+
+### Step 2 — Run the Controller demo
+
+```bash
+# Single pair, airline domain
+python examples/agent_service/run_controller_demo.py \
+    --guard-addr http://localhost:8090
+
+# Multi-pair, different domain
+python examples/agent_service/run_controller_demo.py \
+    --guard-addr http://localhost:8090 \
+    --num-pairs 2 --domain telecom --full
+```
+
+The Controller will:
+
+1. Fork **Router** on the Guard
+1. Fork **Worker+DataProxy** pair(s) and register with Router
+1. Fork **Gateway** on the Guard
+1. Run the tau2 demo through the Gateway
+1. Destroy all services on exit
+
+### Programmatic usage
+
+```python
+from areal.experimental.agent_service.controller import (
+    AgentServiceController,
+    AgentServiceControllerConfig,
+)
+
+ctrl = AgentServiceController(
+    config=AgentServiceControllerConfig(
+        agent_cls_path="examples.agent_service.agent.Tau2Agent",
+        num_pairs=2,
+    ),
+    guard_addrs=["http://guard0:8090"],
+)
+ctrl.initialize()
+# ctrl.gateway_addr → "http://10.0.0.1:9005"
+# ctrl.scale_up(2)   → add 2 more pairs
+# ctrl.scale_down(1) → remove 1 pair
+ctrl.destroy()
 ```
 
 ## Implementing Your Own Agent

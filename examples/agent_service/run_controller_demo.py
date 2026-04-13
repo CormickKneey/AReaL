@@ -1,54 +1,47 @@
-"""One-click demo: Agent Service + Tau2 (PydanticAI).
+"""Controller-based demo: launch Agent Service via AgentServiceController.
+
+This is the production-style launch pattern that mirrors how
+``GatewayInferenceController`` manages the inference service stack.
+A Guard process is started first, then the Controller forks Router,
+Worker+DataProxy pairs, and Gateway onto the Guard via HTTP API.
 
 Usage::
 
-    python examples/agent_service/run_demo.py                       # single task
-    python examples/agent_service/run_demo.py --domain telecom      # different domain
-    python examples/agent_service/run_demo.py --full                # all tasks
-    python examples/agent_service/run_demo.py --config my.yaml      # custom config
+    # 1. Start a Guard (separate terminal or background)
+    python -m areal.experimental.agent_service.guard \
+        --experiment-name demo --trial-name run0 \
+        --role agent-guard --worker-index 0 --port 8090
 
-Requires::
+    # 2. Run this script
+    python examples/agent_service/run_controller_demo.py \
+        --guard-addr http://localhost:8090
 
-    pip install pydantic-ai
-    pip install git+https://github.com/dhh1995/tau2-bench.git@dhh/async-and-custom-completion
+    # Or with options
+    python examples/agent_service/run_controller_demo.py \
+        --guard-addr http://localhost:8090 \
+        --num-pairs 2 --domain telecom --full
+
+For a simpler one-click demo (without Guard/Controller), use run_demo.py.
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
-import yaml
-
 import argparse
 import asyncio
-import threading
+import os
 import time
+from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import httpx
-import uvicorn
+import yaml
 
-from areal.experimental.agent_service.data_proxy.app import (
-    create_data_proxy_app,
+from areal.experimental.agent_service.controller import (
+    AgentServiceController,
+    AgentServiceControllerConfig,
 )
-from areal.experimental.agent_service.gateway.app import (
-    create_gateway_app,
-)
-from areal.experimental.agent_service.gateway.bridge import (
-    OpenResponsesBridge,
-    mount_bridge,
-)
-from areal.experimental.agent_service.router.app import create_router_app
-from areal.experimental.agent_service.worker.app import create_worker_app
 
-
-_DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
-ROUTER_PORT = 18081
-WORKER_PORT = 19000
-PROXY_PORT = 19100
-GATEWAY_PORT = 18080
+DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
 
 
 def _load_config(path: str | Path) -> dict[str, Any]:
@@ -56,16 +49,7 @@ def _load_config(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _start_in_thread(app, port: int, name: str) -> threading.Thread:
-    def run():
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
-
-    t = threading.Thread(target=run, daemon=True, name=name)
-    t.start()
-    return t
-
-
-async def _wait_healthy(url: str, timeout: float = 10.0) -> None:
+async def _wait_healthy(url: str, timeout: float = 30.0) -> None:
     async with httpx.AsyncClient() as client:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -75,12 +59,12 @@ async def _wait_healthy(url: str, timeout: float = 10.0) -> None:
                     return
             except httpx.ConnectError:
                 pass
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.5)
     raise TimeoutError(f"Service at {url} did not become healthy")
 
 
 async def run_task(gateway_addr: str, task, domain: str, admin_key: str) -> float:
-    """Run a single tau2 task. Returns the reward."""
+    """Run a single tau2 task through the gateway. Returns the reward."""
     from tau2.data_model.message import AssistantMessage, UserMessage
     from tau2.data_model.simulation import SimulationRun, TerminationReason
     from tau2.evaluator.evaluator import EvaluationType, evaluate_simulation
@@ -178,7 +162,7 @@ async def run_demo(gateway_addr: str, domain: str, full: bool, admin_key: str) -
     from tau2.registry import registry
 
     print(f"\n{'=' * 60}")
-    print(f"  Tau2 Agent Service Demo — domain: {domain}")
+    print(f"  Tau2 Agent Service Demo (Controller mode) — domain: {domain}")
     print(f"{'=' * 60}")
 
     tasks = registry.get_tasks_loader(domain)(None)
@@ -207,16 +191,29 @@ async def run_demo(gateway_addr: str, domain: str, full: bool, admin_key: str) -
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Tau2 Agent Service Demo")
+    parser = argparse.ArgumentParser(
+        description="Tau2 Agent Service Demo (Controller mode)"
+    )
+    parser.add_argument(
+        "--guard-addr",
+        required=True,
+        help="Guard HTTP address (e.g. http://localhost:8090)",
+    )
     parser.add_argument(
         "--config",
-        default=str(_DEFAULT_CONFIG),
-        help=f"Config YAML path (default: {_DEFAULT_CONFIG})",
+        default=str(DEFAULT_CONFIG),
+        help=f"Config YAML path (default: {DEFAULT_CONFIG})",
     )
     parser.add_argument(
         "--domain",
         choices=["airline", "retail", "telecom"],
         help="Override tau2.domain from config",
+    )
+    parser.add_argument(
+        "--num-pairs",
+        type=int,
+        default=1,
+        help="Number of Worker+DataProxy pairs (default: 1)",
     )
     parser.add_argument(
         "--full",
@@ -227,88 +224,60 @@ def main() -> None:
 
     config = _load_config(args.config)
     tau2_cfg = config.setdefault("tau2", {})
-
     domain = args.domain or tau2_cfg.get("domain", "airline")
-    tau2_cfg["domain"] = domain
-
     data_dir = tau2_cfg.get("data_dir") or os.environ.get("TAU2_DATA_DIR")
     if data_dir:
         os.environ["TAU2_DATA_DIR"] = data_dir
-
     admin_key = config.get("admin_key", "areal-agent-admin")
 
-    router_addr = f"http://127.0.0.1:{ROUTER_PORT}"
-    worker_addr = f"http://127.0.0.1:{WORKER_PORT}"
-    proxy_addr = f"http://127.0.0.1:{PROXY_PORT}"
-    gateway_addr = f"http://127.0.0.1:{GATEWAY_PORT}"
+    child_env: dict[str, str] = {}
+    if data_dir:
+        child_env["TAU2_DATA_DIR"] = data_dir
+    child_env["TAU2_DOMAIN"] = domain
 
-    # 1. Router
-    from areal.experimental.agent_service.router.config import RouterConfig
+    agent_llm_cfg = config.get("agent_llm", {})
+    if agent_llm_cfg.get("model"):
+        child_env["AGENT_LLM_MODEL"] = agent_llm_cfg["model"]
+    if agent_llm_cfg.get("base_url"):
+        child_env["AGENT_LLM_BASE_URL"] = agent_llm_cfg["base_url"]
+    if agent_llm_cfg.get("api_key"):
+        child_env["AGENT_LLM_API_KEY"] = agent_llm_cfg["api_key"]
 
-    _start_in_thread(
-        create_router_app(RouterConfig(admin_api_key=admin_key)), ROUTER_PORT, "router"
+    # --- Controller ---
+    ctrl_config = AgentServiceControllerConfig(
+        agent_cls_path="examples.agent_service.agent.Tau2Agent",
+        admin_key=admin_key,
+        num_pairs=args.num_pairs,
+        env=child_env,
+    )
+    ctrl = AgentServiceController(
+        config=ctrl_config,
+        guard_addrs=[args.guard_addr],
     )
 
-    # 2. Worker (Tau2Agent with PydanticAI + tau2 tools)
-    def _make_agent_cls():
-        from examples.agent_service.agent import Tau2Agent
+    try:
+        print(f"Initializing with {args.num_pairs} pair(s) on {args.guard_addr} ...")
+        ctrl.initialize()
+        print(f"  Router:  {ctrl.router_addr}")
+        print(f"  Gateway: {ctrl.gateway_addr}")
+        print(f"  Pairs:   {len(ctrl.pairs)}")
 
-        class _Configured(Tau2Agent):
-            def __init__(self, **kw: Any):
-                super().__init__(config=config, **kw)
+        # Wait for Gateway to be fully ready
+        asyncio.run(_wait_healthy(f"{ctrl.gateway_addr}/health"))
 
-        return _Configured
-
-    with patch(
-        "areal.experimental.agent_service.worker.app.import_from_string",
-        return_value=_make_agent_cls(),
-    ):
-        worker_app = create_worker_app("examples.agent_service.agent.Tau2Agent")
-    _start_in_thread(worker_app, WORKER_PORT, "worker")
-
-    # 3. DataProxy
-    from areal.experimental.agent_service.data_proxy.config import DataProxyConfig
-
-    _start_in_thread(
-        create_data_proxy_app(DataProxyConfig(worker_addr=worker_addr)),
-        PROXY_PORT,
-        "proxy",
-    )
-
-    # 4. Gateway + Bridge
-    from areal.experimental.agent_service.gateway.config import GatewayConfig
-
-    gw_config = GatewayConfig(router_addr=router_addr, admin_api_key=admin_key)
-    gw_app = create_gateway_app(gw_config)
-    mount_bridge(
-        gw_app,
-        OpenResponsesBridge(router_addr=router_addr, admin_api_key=admin_key),
-        admin_api_key=admin_key,
-    )
-    _start_in_thread(gw_app, GATEWAY_PORT, "gateway")
-
-    # 5. Wait + register
-    async def setup():
-        await _wait_healthy(f"{router_addr}/health")
-        await _wait_healthy(f"{worker_addr}/health")
-        await _wait_healthy(f"{proxy_addr}/health")
-        await _wait_healthy(f"{gateway_addr}/health")
-        from areal.experimental.agent_service.auth import admin_headers
-
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{router_addr}/register",
-                json={"addr": proxy_addr},
-                headers=admin_headers(admin_key),
+        # Run demo
+        asyncio.run(
+            run_demo(
+                ctrl.gateway_addr,
+                domain=domain,
+                full=args.full,
+                admin_key=admin_key,
             )
-
-    asyncio.run(setup())
-    print("All services started.")
-
-    # 6. Run demo
-    asyncio.run(
-        run_demo(gateway_addr, domain=domain, full=args.full, admin_key=admin_key)
-    )
+        )
+    finally:
+        print("\nShutting down ...")
+        ctrl.destroy()
+        print("Done.")
 
 
 if __name__ == "__main__":

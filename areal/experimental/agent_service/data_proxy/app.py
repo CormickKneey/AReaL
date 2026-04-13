@@ -12,6 +12,8 @@ from fastapi import FastAPI
 
 from areal.utils import logging
 
+from .config import DataProxyConfig
+
 logger = logging.getLogger("AgentDataProxy")
 
 
@@ -22,20 +24,19 @@ class _SessionData:
     last_active: float = field(default_factory=time.monotonic)
 
 
-def create_data_proxy_app(
-    worker_addr: str,
-    session_timeout: int = 3600,
-) -> FastAPI:
+def create_data_proxy_app(config: DataProxyConfig) -> FastAPI:
     app = FastAPI(title="AReaL Data Proxy")
     sessions: dict[str, _SessionData] = {}
-    http_client = httpx.AsyncClient(timeout=600.0)
+    http_client = httpx.AsyncClient(timeout=config.request_timeout)
 
     async def _reap_idle_sessions() -> None:
         while True:
             await asyncio.sleep(60)
             now = time.monotonic()
             stale = [
-                k for k, s in sessions.items() if now - s.last_active > session_timeout
+                k
+                for k, s in sessions.items()
+                if now - s.last_active > config.session_timeout
             ]
             for k in stale:
                 del sessions[k]
@@ -55,17 +56,11 @@ def create_data_proxy_app(
         return {
             "status": "ok",
             "active_sessions": len(sessions),
-            "worker_addr": worker_addr,
+            "worker_addr": config.worker_addr,
         }
 
     @app.post("/session/{session_key}/turn")
     async def turn(session_key: str, body: dict[str, Any]):
-        """Process one turn. session_key must be unique per agent session.
-
-        When used with the rollout service, uniqueness is ensured by
-        ``/rl/start_session``.  When used standalone, callers must
-        generate unique keys (e.g. ``f"{model}:{user_id}"``).
-        """
         session = sessions.get(session_key)
         if session is None:
             session = _SessionData()
@@ -85,7 +80,7 @@ def create_data_proxy_app(
             "metadata": metadata,
         }
 
-        resp = await http_client.post(f"{worker_addr}/run", json=worker_request)
+        resp = await http_client.post(f"{config.worker_addr}/run", json=worker_request)
         resp.raise_for_status()
         result = resp.json()
 
